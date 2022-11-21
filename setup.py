@@ -130,7 +130,7 @@ setup(
     ext_modules=[CMakeExtension("cellworld2")],
     cmdclass={"build_ext": CMakeBuild},
     zip_safe=False,
-    requires=["json_cpp2"],
+    requires=["requests"],
     extras_require={},
     python_requires=">=3.6",
 )

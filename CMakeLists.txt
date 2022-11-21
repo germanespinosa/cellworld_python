@@ -22,6 +22,7 @@ endif()
 
 install_git_dependency( Cellworld
         https://github.com/germanespinosa/cellworld
+        CONNECTED
         INCLUDE_DIRECTORIES include )
 
 install_git_dependency( Date

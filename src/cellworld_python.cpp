@@ -39,16 +39,27 @@ struct Python_json_object :  Json_builder {
     }
 };
 
+Coordinates tuple_to_coordinates(const pybind11::tuple &t){
+    return {t[0].cast<int>(),  t[1].cast<int>()};
+}
+
+Location tuple_to_location(const pybind11::tuple &t){
+    return {t[0].cast<float>(),  t[1].cast<float>()};
+}
+
+
 PYBIND11_MODULE(cellworld2_core, m)
 {
-
     json_vector_binding<int>(m,"Int_list");
+    json_vector_binding<string>(m,"String_list");
     json_vector_binding<bool>(m,"Bool_list");
     json_vector_binding<unsigned int>(m,"Unsigned_int_list");
     json_vector_binding<float>(m,"Float_list");
 
     json_object_binding<Location>(m,"Location")
             .def(pybind11::init<float,float>())
+            .def_readwrite("x", &Location::x)
+            .def_readwrite("y", &Location::y)
             .def("mod",  &Location::mod)
             .def("move",  &Location::move)
             .def("transform",  &Location::transform)
@@ -72,7 +83,10 @@ PYBIND11_MODULE(cellworld2_core, m)
     json_vector_binding<Location>(m,"Location_list");
 
     json_object_binding<Coordinates>(m,"Coordinates")
-            .def(pybind11::init<int,int>());
+            .def(pybind11::init<int,int>())
+            .def_readwrite("x", &Coordinates::x)
+            .def_readwrite("y", &Coordinates::y)
+            ;
 
     json_vector_binding<Coordinates>(m,"Coordinates_list");
 
@@ -131,6 +145,23 @@ PYBIND11_MODULE(cellworld2_core, m)
             .def_readwrite("shape", &Space::shape)
             .def_readwrite("transformation", &Space::transformation)
             .def("transform", &Space::transform)
+            .def("transform", +[](const Space& src, const pybind11::tuple &l, const Space &dst){
+                return src.transform(tuple_to_location(l), dst);
+            })
+            .def("transform_multi", [](const Space& src, const Location_list &ll, const Space &dst){
+                Location_list r;
+                for (auto &l:ll){
+                    r.push_back(src.transform(l,dst));
+                }
+                return r;
+            })
+            .def("transform_multi", [](const Space& src, const pybind11::list &ll, const Space &dst){
+                Location_list r;
+                for (auto &l:ll){
+                    r.push_back(src.transform(tuple_to_location(l.cast<pybind11::tuple>()),dst));
+                }
+                return r;
+            })
             .def("scale", &Space::scale)
             ;
 
@@ -396,12 +427,69 @@ PYBIND11_MODULE(cellworld2_core, m)
             .def("is_visible", &Coordinates_visibility_cone::is_visible)
             ;
 
+    struct Pose_itor : json_cpp::Json_object {
+        Json_object_members(
+                Add_member(visible_locations);
+                Add_member(exposed_locations);
+                Add_member(exposed_body_part_locations);
+                );
+        Location_list visible_locations;
+        Location_list exposed_locations;
+        Json_vector<Location_list> exposed_body_part_locations;
+    };
+
+    class_<Pose_itor>(m, "Pose_itor")
+            .def(init<>())
+            ;
+
     class_<Location_visibility>(m, "Location_visibility")
             .def(init<const Shape &, const Transformation &>())
             .def(init<const Cell_group &, const Shape &, const Transformation &>())
             .def("is_visible", +[](const Location_visibility& lv, const Location &src, const Location &dst){ return lv.is_visible(src, dst);})
             .def("is_visible", +[](const Location_visibility& lv, const Location &src, float src_theta, float src_cone, const Location &dst){ return lv.is_visible(src, src_theta, src_cone, dst);})
             .def("is_visible_multi", &Location_visibility::is_visible_multi)
+            .def("get_visible_locations", +[] (const Location_visibility& lv, const Location &src, float src_theta, float src_cone, const Location_list &dst_multi ){
+                return lv.get_visible_locations(src, src_theta, src_cone, dst_multi);
+            })
+            .def("get_visible_locations", +[] (const Location_visibility& lv, const Location &src, float src_theta, float src_cone){
+                return lv.get_visible_locations(src, src_theta, src_cone);
+            })
+            .def("get_visible_locations", +[] (const Location_visibility& lv, const Location &src){
+                return lv.get_visible_locations(src);
+            })
+            .def("get_visible_locations", +[] (const Location_visibility& lv, const Location &src, const Location_list &dst_multi ){
+                return lv.get_visible_locations(src, dst_multi);
+            })
+            .def("get_pose_itor",+ [](const Location_visibility &lv, const Location &head, float src_theta, float src_cone, const Location_list &body_parts, const Location_list &cl) {
+                Pose_itor result;
+                result.visible_locations = lv.get_visible_locations(head,  src_theta, src_cone, cl);
+                for (auto bp: body_parts){
+                    result.exposed_body_part_locations.push_back(lv.get_visible_locations(head,  src_theta, src_cone, result.visible_locations));
+                }
+                for (auto &ebpl: result.exposed_body_part_locations){
+                    for (auto l: ebpl){
+                        if (!result.exposed_locations.contains(l)){
+                            result.exposed_locations.push_back(l);
+                        }
+                    }
+                }
+                return result;
+            })
+            .def("get_pose_itor",+ [](const Location_visibility &lv, const Location &head, float src_theta, float src_cone, const Location_list &body_parts) {
+                Pose_itor result;
+                result.visible_locations = lv.get_visible_locations(head,  src_theta, src_cone);
+                for (auto bp: body_parts){
+                    result.exposed_body_part_locations.push_back(lv.get_visible_locations(head,  src_theta, src_cone, result.visible_locations));
+                }
+                for (auto &ebpl: result.exposed_body_part_locations){
+                    for (auto l: ebpl){
+                        if (!result.exposed_locations.contains(l)){
+                            result.exposed_locations.push_back(l);
+                        }
+                    }
+                }
+                return result;
+            })
             ;
 
     json_object_binding<Step>(m,"Step")
@@ -439,21 +527,6 @@ PYBIND11_MODULE(cellworld2_core, m)
             .def_readwrite("start_time", &Experiment::start_time)
             .def_readwrite("episodes", &Experiment::episodes)
             .def("set_name", &Experiment::set_name)
-            ;
-
-    json_object_binding<Python_json_object>(m, "Json_builder")
-            .def("add_member",+[](Python_json_object &jb, const string &name, bool mandatory, int &variable){
-                jb.json_add_member(name,mandatory,std::move(Json_wrap_object(jb.create_member(variable)).get_unique_ptr()));
-            })
-            .def("add_member",+[](Python_json_object &jb, const string &name, bool mandatory, bool &variable){
-                jb.json_add_member(name,mandatory,std::move(Json_wrap_object(jb.create_member(variable)).get_unique_ptr()));
-            })
-            .def("add_member",+[](Python_json_object &jb, const string &name, bool mandatory, float &variable){
-                jb.json_add_member(name,mandatory,std::move(Json_wrap_object(jb.create_member(variable)).get_unique_ptr()));
-            })
-            .def("add_member",+[](Python_json_object &jb, const string &name, bool mandatory, string &variable){
-                jb.json_add_member(name,mandatory,std::move(Json_wrap_object(jb.create_member(variable)).get_unique_ptr()));
-            })
             ;
 }
 

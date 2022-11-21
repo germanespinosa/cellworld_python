@@ -8,6 +8,5 @@ python test_basic.py
 #python ../json_cpp2/json_list.py
 #python ../json_cpp2/json_object.py
 #python ../json_cpp2/json_parser.py
-rm *.json
 )
 
