@@ -1,4 +1,5 @@
 #include <pybind11/pybind11.h>
+#include <cellworld_pose.h>
 #include <cellworld_python.h>
 #include <cell_world/resources.h>
 #include <cell_world/coordinates.h>
@@ -18,26 +19,6 @@ using namespace pybind11;
 using namespace json_cpp;
 using namespace std;
 using namespace cell_world;
-
-struct Python_json_object :  Json_builder {
-
-    vector<void*> pointers;
-
-    template<typename T>
-    T& create_member(T &v){
-        void* pointer = new T();
-        pointers.push_back(pointer);
-        T *t_pointer = (T *)pointer;
-        *t_pointer = v;
-        return *t_pointer;
-    }
-
-    ~Python_json_object(){
-        for(auto pointer:pointers){
-            free(pointer);
-        }
-    }
-};
 
 Coordinates tuple_to_coordinates(const pybind11::tuple &t){
     return {t[0].cast<int>(),  t[1].cast<int>()};
@@ -155,13 +136,13 @@ PYBIND11_MODULE(cellworld2_core, m)
                 }
                 return r;
             })
-            .def("transform_multi", [](const Space& src, const pybind11::list &ll, const Space &dst){
-                Location_list r;
-                for (auto &l:ll){
-                    r.push_back(src.transform(tuple_to_location(l.cast<pybind11::tuple>()),dst));
-                }
-                return r;
-            })
+//            .def("transform_multi", [](const Space& src, const pybind11::list &ll, const Space &dst){
+//                Location_list r;
+//                for (auto &l:ll){
+//                    r.push_back(src.transform(tuple_to_location(l.cast<pybind11::tuple>()),dst));
+//                }
+//                return r;
+//            })
             .def("scale", &Space::scale)
             ;
 
@@ -260,11 +241,21 @@ PYBIND11_MODULE(cellworld2_core, m)
             })
             ;
 
+    json_object_binding<Cell_reference>(m, "Cell_reference")
+            .def("dereference", [] (Cell_reference &r){
+                return (const Cell &) r;
+            })
+            ;
+
+    m.def("get_list_type", +[](Cell_reference &fi){
+        return json_cpp::Json_vector<Cell_reference>();
+    });
+
     json_object_binding<Cell_group>(m,"Cell_group")
             .def(init<const cell_world::Cell_group&>())
-            .def("__getitem__", +[](const Cell_group& cg, size_t i){return cg[i];})
             .def("contains", +[](const Cell_group& cg, unsigned int i){return cg.contains(i);})
             .def("contains", +[](const Cell_group& cg, const Cell &c){return cg.contains(c);})
+            .def("contains", +[](const Cell_group& cg, const Cell_reference &r){return cg.contains(((const Cell&) r).id);})
             .def("clear", &Cell_group::clear)
             .def("find", +[](const Cell_group& cg, unsigned int i){return cg.find(i);})
             .def("find", +[](const Cell_group& cg, const Cell &c){return cg.find(c);})
@@ -282,6 +273,29 @@ PYBIND11_MODULE(cellworld2_core, m)
             .def(self + Cell())
             .def(self == Cell_group())
             .def(self != Cell_group())
+            .def("append", +[](Cell_group& m, const Cell &c){
+                m.add(c);
+            })
+            .def("__getitem__", +[](const Cell_group& m, const int c){return (const Cell &)m[c];})
+            .def("__len__", +[](Cell_group& m){
+                return m.size();
+            })
+            .def("__reversed__", [](const Cell_group &s) { return s.reversed(); })
+            .def("__iter__", [](const Cell_group &s) { return pybind11::make_iterator(s.begin(), s.end()); }, pybind11::keep_alive<0, 1>() /* Essential: keep object alive while iterator exists */)
+            .def("where", [](const Cell_group &s, pybind11::function &criteria) {
+                Cell_group r;
+                for(const Cell &i:s){
+                    pybind11::object o = criteria(i);
+                    auto result = o.cast<bool>();
+                    if (result) r.add(i);
+                }
+                return r;
+            })
+            .def("get", [](const Cell_group &s, pybind11::function &process) {
+                pybind11::object module = pybind11::module_::import("cellworld2");
+                pybind11::object process_list = module.attr("process_reference_list");
+                return process_list(s, process);
+            })
             ;
 
     json_object_binding<Graph>(m,"Graph")
@@ -438,8 +452,24 @@ PYBIND11_MODULE(cellworld2_core, m)
         Json_vector<Location_list> exposed_body_part_locations;
     };
 
+
+    json_vector_binding<Location_list>(m,"Location_list_list");
+
     class_<Pose_itor>(m, "Pose_itor")
             .def(init<>())
+            .def_readwrite("visible_locations", &Pose_itor::visible_locations)
+            .def_readwrite("exposed_locations", &Pose_itor::exposed_locations)
+            .def_readwrite("exposed_body_part_locations", &Pose_itor::exposed_body_part_locations)
+            ;
+
+    json_object_binding<Pose_part>(m, "Pose_part")
+            .def_readwrite("part", &Pose_part::part)
+            .def_readwrite("location", &Pose_part::location)
+            .def_readwrite("camera", &Pose_part::camera)
+            .def_readwrite("score", &Pose_part::score)
+            ;
+
+    json_vector_binding<Pose_part>(m, "Pose")
             ;
 
     class_<Location_visibility>(m, "Location_visibility")
@@ -464,7 +494,72 @@ PYBIND11_MODULE(cellworld2_core, m)
                 Pose_itor result;
                 result.visible_locations = lv.get_visible_locations(head,  src_theta, src_cone, cl);
                 for (auto bp: body_parts){
-                    result.exposed_body_part_locations.push_back(lv.get_visible_locations(head,  src_theta, src_cone, result.visible_locations));
+                    result.exposed_body_part_locations.push_back(lv.get_visible_locations(bp,  src_theta, src_cone, result.visible_locations));
+                }
+                for (auto &ebpl: result.exposed_body_part_locations){
+                    for (auto l: ebpl){
+                        if (!result.exposed_locations.contains(l)){
+                            result.exposed_locations.push_back(l);
+                        }
+                    }
+                }
+                return result;
+            })
+            .def("get_pose_itor",+ [](const Location_visibility &lv, const Json_vector<Pose_part> &pose, const string &head_label, const string &body_label, float src_cone, const pybind11::list &body_parts, const Location_list &cl, float score_threshold) {
+                Pose_itor result;
+                Location head;
+                for (auto &pp: pose){
+                    if(pp.part == head_label) {
+                        head = pp.location;
+                        break;
+                    }
+                }
+                Location body;
+                for (auto &pp: pose){
+                    if(pp.part == body_label) {
+                        body = pp.location;
+                        break;
+                    }
+                }
+                vector<int> pose_part_index;
+                for (pybind11::handle part:body_parts){
+                    auto part_label = part.cast<string>();
+                    int part_index = Not_found;
+                    for (unsigned int i = 0; i < pose.size(); i++){
+                        if(pose[i].part == part_label) {
+                            if (pose[i].score >= score_threshold)
+                                part_index = (int)i;
+                            break;
+                        }
+                    }
+                    pose_part_index.push_back(part_index);
+                }
+                float src_theta = body.atan(head);
+                result.visible_locations = lv.get_visible_locations(head,  src_theta, src_cone, cl);
+                for (auto bpi: pose_part_index){
+                    if (bpi==Not_found) {
+                        result.exposed_body_part_locations.emplace_back();
+                    } else {
+                        result.exposed_body_part_locations.push_back(lv.get_visible_locations(pose[bpi].location, src_theta, src_cone, result.visible_locations));
+                    }
+                }
+                for (auto &ebpl: result.exposed_body_part_locations){
+                    for (auto l: ebpl){
+                        if (!result.exposed_locations.contains(l)){
+                            result.exposed_locations.push_back(l);
+                        }
+                    }
+                }
+                return result;
+            })
+            .def("get_pose_itor",+ [](const Location_visibility &lv, const Json_vector<Pose_part> &pose, const int head_index, const int body_index, float src_cone, const Json_vector<int> pose_part_index, const Location_list &cl, float score_threshold) {
+                Pose_itor result;
+                Location head = pose[head_index].location;
+                Location body = pose[body_index].location;
+                float src_theta = body.atan(head);
+                result.visible_locations = lv.get_visible_locations(head,  src_theta, src_cone, cl);
+                for (auto bpi: pose_part_index){
+                    result.exposed_body_part_locations.push_back(lv.get_visible_locations(pose[bpi].location, src_theta, src_cone, result.visible_locations));
                 }
                 for (auto &ebpl: result.exposed_body_part_locations){
                     for (auto l: ebpl){
@@ -479,7 +574,7 @@ PYBIND11_MODULE(cellworld2_core, m)
                 Pose_itor result;
                 result.visible_locations = lv.get_visible_locations(head,  src_theta, src_cone);
                 for (auto bp: body_parts){
-                    result.exposed_body_part_locations.push_back(lv.get_visible_locations(head,  src_theta, src_cone, result.visible_locations));
+                    result.exposed_body_part_locations.push_back(lv.get_visible_locations(bp,  src_theta, src_cone, result.visible_locations));
                 }
                 for (auto &ebpl: result.exposed_body_part_locations){
                     for (auto l: ebpl){
